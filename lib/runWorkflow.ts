@@ -1,4 +1,4 @@
-import { fileSearchTool, Agent, RunContext, AgentInputItem, Runner, withTrace } from "@openai/agents";
+import { fileSearchTool, Agent, AgentInputItem, Runner, withTrace } from "@openai/agents";
 import { OpenAI } from "openai";
 import { runGuardrails } from "@openai/guardrails";
 import { z } from "zod";
@@ -9,16 +9,8 @@ const fileSearch = fileSearchTool([
   "vs_691a5156555c8191ab2a810b9a3148dc"
 ])
 
-let client: OpenAI | null = null;
-function getClient() {
-  if (!client) {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error("OPENAI_API_KEY environment variable is not set");
-    }
-    client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  }
-  return client;
-}
+// Shared client for guardrails and file search
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Guardrails definitions
 const guardrailConfig = {
@@ -28,9 +20,7 @@ const guardrailConfig = {
     { name: "Custom Prompt Check", config: { system_prompt_details: "You are a supposed to answer questions about previous debates in Region Östergötland. Raise the guardrail if questions aren’t focused on what has been said in a particular debate, citations from specific speakers or parties, arguments raised by specific speakers or parties, on sources for citations or general assumptions. Follow-up questions and answers from an earlier response should not raise the guardrail.", model: "gpt-4.1-mini", confidence_threshold: 0.7 } }
   ]
 };
-function getContext() {
-  return { guardrailLlm: getClient() };
-}
+const context = { guardrailLlm: client };
 
 function guardrailsHasTripwire(results: any[]): boolean {
     return (results ?? []).some((r) => r?.tripwireTriggered === true);
@@ -51,7 +41,7 @@ async function scrubConversationHistory(history: any[], piiOnly: any): Promise<v
         const content = Array.isArray(msg?.content) ? msg.content : [];
         for (const part of content) {
             if (part && typeof part === "object" && part.type === "input_text" && typeof part.text === "string") {
-                const res = await runGuardrails(part.text, piiOnly, getContext(), true);
+                const res = await runGuardrails(part.text, piiOnly, context, true);
                 part.text = getGuardrailSafeText(res, part.text);
             }
         }
@@ -62,13 +52,13 @@ async function scrubWorkflowInput(workflow: any, inputKey: string, piiOnly: any)
     if (!workflow || typeof workflow !== "object") return;
     const value = workflow?.[inputKey];
     if (typeof value !== "string") return;
-    const res = await runGuardrails(value, piiOnly, getContext(), true);
+    const res = await runGuardrails(value, piiOnly, context, true);
     workflow[inputKey] = getGuardrailSafeText(res, value);
 }
 
 async function runAndApplyGuardrails(inputText: string, config: any, history: any[], workflow: any) {
     const guardrails = Array.isArray(config?.guardrails) ? config.guardrails : [];
-    const results = await runGuardrails(inputText, config, getContext(), true);
+    const results = await runGuardrails(inputText, config, context, true);
     const shouldMaskPII = guardrails.find((g: any) => (g?.name === "Contains PII") && g?.config && g.config.block === false);
     if (shouldMaskPII) {
         const piiOnly = { guardrails: [shouldMaskPII] };
@@ -83,7 +73,7 @@ async function runAndApplyGuardrails(inputText: string, config: any, history: an
 
 function buildGuardrailFailOutput(results: any[]) {
     const get = (name: string) => (results ?? []).find((r: any) => ((r?.info?.guardrail_name ?? r?.info?.guardrailName) === name));
-    const pii = get("Contains PII"), mod = get("Moderation"), jb = get("Jailbreak"), hal = get("Hallucination Detection"), nsfw = get("NSFW Text"), url = get("URL Filter"), custom = get("Custom Prompt Check"), pid = get("Prompt Injection Detection"), piiCounts = Object.entries(pii?.info?.detected_entities ?? {}).filter(([, v]) => Array.isArray(v)).map(([k, v]: [any, any]) => k + ":" + v.length), conf = jb?.info?.confidence;
+    const pii = get("Contains PII"), mod = get("Moderation"), jb = get("Jailbreak"), hal = get("Hallucination Detection"), nsfw = get("NSFW Text"), url = get("URL Filter"), custom = get("Custom Prompt Check"), pid = get("Prompt Injection Detection"), piiCounts = Object.entries(pii?.info?.detected_entities ?? {}).filter(([, v]: [string, unknown]) => Array.isArray(v)).map(([k, v]: [string, any]) => k + ":" + v.length), conf = jb?.info?.confidence;
     return {
         pii: { failed: (piiCounts.length > 0) || pii?.tripwireTriggered === true, detected_counts: piiCounts },
         moderation: { failed: mod?.tripwireTriggered === true || ((mod?.info?.flagged_categories ?? []).length > 0), flagged_categories: mod?.info?.flagged_categories },
@@ -95,102 +85,115 @@ function buildGuardrailFailOutput(results: any[]) {
         prompt_injection: { failed: pid?.tripwireTriggered === true },
     };
 }
-const RfAgentSchema = z.object({ source_files: z.string(), output_text: z.string() });
+const RfAgentSchema = z.object({ output_text: z.string(), citations: z.array(z.object({ citation: z.string(), source_file: z.string(), time_stamp: z.string() })) });
 const rfAgent = new Agent({
   name: "RF-agent",
-  instructions: `Role and Context
-You are an assistant that answers questions about past Regional Council (fullmäktige) debates in Region Östergötland during the 2022–2026 mandate period. In Region Östergötland, the Moderate Party, the Liberal Party, and the Christian Democrats govern with support from the Sweden Democrats. The Social Democrats, the Centre Party, the Green Party, and the Left Party are in opposition.
+  instructions: `Answer user questions about past Regional Council debates in Region Östergötland (2022–2026), providing neutral, accurate, and data-grounded responses based only on vectors from the full debate transcriptions. For every citation referenced in your output_text, construct a complete citation object containing the cited text, source file, and timestamp. 
 
-Your Purpose
-Users will ask questions about events, statements, or topics discussed in past council debates.
-Your job is to search the available vector stores and use the retrieved documents to produce accurate, source-grounded answers.
+# Task Details
 
-Your Available Tools
-You have access to a vector stores:
+- Retrieve relevant transcripts from the vector store to answer the user's question accurately and objectively.
+- Use only the information in the retrieved transcription segments; do not invent or assume information.
+- When quoting or paraphrasing debate content, extract, for each citation used:
+    - The exact quotation or relevant excerpt (\"citation\").
+    - The file name of the document (\"source_file\").
+    - The start and end timestamp as a string or range (\"time_stamp\"; e.g., \"00:12:14–00:13:02\").
+- For each unique citation referenced in output_text (including both direct quotations or paraphrases), create a separate entry in the output field citation as an array of objects with keys citation, source_file, and time_stamp.
+- Clearly separate your main answer output (output_text) from the citation details (citation array).
 
-A vector store containing full transcriptions of all debates, including metadata such as timestamps and source URLs.
+# Steps
 
-How to Answer
-When the user asks a question:
+1. Retrieve relevant transcription segments from the vector store matching the user's query.
+2. Analyze the content and select quotations or paraphrases that best support the answer.
+3. For every citation referenced in output_text, extract the citation text, source file name, and timestamp.
+4. Present the main answer in output_text, referencing supporting material where appropriate.
+5. Output a citation array, with each entry consisting of citation, source_file, and time_stamp as described.
+6. If no relevant materials are found, clearly state that no supporting transcription segments were retrieved; output citations as an empty array.
 
-Retrieve relevant transcription segments from the transcription vector store.
-Use only the retrieved transcription text as the factual basis for your answer. Do not invent or assume information.
-If quoting or paraphrasing a debate:
+# Citation Extraction and Structure
 
-Include the exact timestamps (start and end time) from the transcription metadata.
-Provide a short explanation of how the retrieved excerpt answers the user’s question.
+- Every supporting statement, quotation, or paraphrase in output_text must have its own citation entry in the array.
+- source_file refers to the file name of the document segment cited.
+- time_stamp includes the start and end time directly from the metadata.
+- Do not invent, assume, or merge citations—be strict and granular.
+- Maintain accuracy, neutrality, and grounding.
+- If multiple documents are cited, ensure each citation object correctly maps to its source.
 
-Clearly separate your answer from the citation information.
+# Output Format
 
-Citation Format
-When presenting supporting material:
+- Output a JSON object structured as follows:
 
-Provide timestamp range
-Provide the quotation or relevant excerpt
-Example:
-“According to the transcription (00:12:14–00:13:02): ‘…quoted text…’
+{
+  \"output_text\": \"[Your neutral, well-supported answer text, referencing supporting excerpts where relevant.]\",
+  \"citation\": [
+    {
+      \"citation\": \"[Exact quotation or relevant excerpt as cited in output_text]\",
+      \"source_file\": \"[File name of the source transcript used]\",
+      \"time_stamp\": \"[Start–End time of the excerpt, e.g., 00:12:14–00:13:02]\"
+    },
+    ...(repeat for each citation used in output_text)...
+  ]
+}
 
-Additional Rules
+- If no citations are present, citation should be an empty array ([]).
 
-Do not claim knowledge of debate content that is not present in the retrieved transcriptions.
-If no relevant material is found, clearly state that no supporting transcription segments were retrieved.
-Always prioritize accuracy, neutrality, and grounding in the provided data.
+# Examples
 
-Put the output in output_text. 
+Example 1 (single citation):
 
-If there is a citation referenced in the output_text, put the file name of the file where the citation has been fetched in source_files.`,
+Input: \"What did the council say about hospital funding in 2023?\"
+
+{
+  \"output_text\": \"In 2023, the council discussed increased hospital funding. For example, according to one debate segment, 'We have allocated an extra 100 million SEK to hospital operations this year.'\",
+  \"citation\": [
+    {
+      \"citation\": \"We have allocated an extra 100 million SEK to hospital operations this year.\",
+      \"source_file\": \"region_2023_budget_session.pdf\",
+      \"time_stamp\": \"00:38:45–00:39:12\"
+    }
+  ]
+}
+
+Example 2 (multiple citations):
+
+Input: \"Did any opposition members respond to the funding increase?\"
+
+{
+  \"output_text\": \"Yes, several opposition members voiced concerns about sufficiency. The Social Democrats stated, 'While the increase is welcome, it does not address the staffing shortage.' The Green Party added, 'Sustainable investments must also be prioritized.'\",
+  \"citation\": [
+    {
+      \"citation\": \"While the increase is welcome, it does not address the staffing shortage.\",
+      \"source_file\": \"region_2023_budget_session.pdf\",
+      \"time_stamp\": \"00:39:22–00:39:47\"
+    },
+    {
+      \"citation\": \"Sustainable investments must also be prioritized.\",
+      \"source_file\": \"region_2023_budget_session.pdf\",
+      \"time_stamp\": \"00:40:03–00:40:18\"
+    }
+  ]
+}
+
+(Real examples should closely mirror real quotations and refer to the relevant files and timestamps as in the actual data.)
+
+# Notes
+
+- Every supporting excerpt directly referenced in output_text must have a corresponding citation entry.
+- If a citation is paraphrased, use the most representative text excerpt.
+- Provide all required metadata (citation, source_file, time_stamp) for each citation, exactly as described, without omission or addition.
+
+Remember:
+- Output only the specified JSON structure—do not include extra text, explanations, or formatting outside this schema.
+- All citations used in your output_text must be included in the citation array, fully populated.
+- Always think step-by-step: retrieve, analyze, extract, structure, review, and finalize.
+- Prioritize being accurate, neutral, and grounded in the provided data at all times.`,
   model: "gpt-4.1",
   tools: [
     fileSearch
   ],
   outputType: RfAgentSchema,
   modelSettings: {
-    temperature: 1,
-    topP: 1,
-    maxTokens: 2048,
-    store: true
-  }
-});
-
-interface UrlAgentContext {
-  inputOutputParsedSourceFiles: string;
-}
-const urlAgentInstructions = (runContext: RunContext<UrlAgentContext>, _agent: Agent<UrlAgentContext>) => {
-  const { inputOutputParsedSourceFiles } = runContext.context;
-  return `You must find and extract a URL from a JSON file in the vector store.
-
-## Your Task:
-1. Search the vector store for a file named: "${inputOutputParsedSourceFiles}"
-2. Open that JSON file and find the path: metadata.links[0]
-3. Extract the URL value at that location
-4. Return ONLY the raw URL string (no markdown, no formatting, just the URL)
-
-## Example:
-If the file contains: {"metadata": {"links": ["https://example.com/debate"]}}
-You should output: https://example.com/debate
-
-## Important:
-- Return ONLY the URL string
-- No markdown formatting like [Link](url)
-- No explanatory text
-- Just the raw URL`
-}
-
-const UrlAgentSchema = z.object({ 
-  url: z.string().describe("The extracted URL from metadata.links[0]")
-});
-
-const urlAgent = new Agent({
-  name: "Url Agent",
-  instructions: urlAgentInstructions,
-  model: "gpt-4.1",
-  tools: [
-    fileSearch
-  ],
-  outputType: UrlAgentSchema,
-  ],
-  modelSettings: {
-    temperature: 1,
+    temperature: 0,
     topP: 1,
     maxTokens: 2048,
     store: true
@@ -227,57 +230,16 @@ export const runWorkflow = async (workflow: WorkflowInput) => {
           ...conversationHistory
         ]
       );
-      conversationHistory.push(...rfAgentResultTemp.newItems.map((item) => item.rawItem));
 
       if (!rfAgentResultTemp.finalOutput) {
           throw new Error("Agent result is undefined");
       }
 
-      console.log("🤖 RF Agent finalOutput:", JSON.stringify(rfAgentResultTemp.finalOutput, null, 2));
-
       const rfAgentResult = {
         output_text: JSON.stringify(rfAgentResultTemp.finalOutput),
         output_parsed: rfAgentResultTemp.finalOutput
       };
-      
-      console.log("📋 Parsed source_files:", rfAgentResult.output_parsed.source_files);
-      
-      if (rfAgentResult.output_parsed.source_files != null) {
-        console.log("🔗 Kör URL Agent med source_files:", rfAgentResult.output_parsed.source_files);
-        
-        const urlAgentResultTemp = await runner.run(
-          urlAgent,
-          [
-            ...conversationHistory
-          ],
-          {
-            context: {
-              inputOutputParsedSourceFiles: rfAgentResult.output_parsed.source_files
-            }
-          }
-        );
-        conversationHistory.push(...urlAgentResultTemp.newItems.map((item) => item.rawItem));
-
-        if (!urlAgentResultTemp.finalOutput) {
-            throw new Error("Agent result is undefined");
-        }
-
-        console.log("🌐 URL Agent finalOutput:", urlAgentResultTemp.finalOutput);
-
-        const urlAgentResult = {
-          output_text: rfAgentResult.output_parsed.output_text,
-          source_url: typeof urlAgentResultTemp.finalOutput === 'object' && urlAgentResultTemp.finalOutput?.url 
-            ? urlAgentResultTemp.finalOutput.url 
-            : (urlAgentResultTemp.finalOutput ?? "")
-        };
-        
-        console.log("✨ Returnerar med source_url:", urlAgentResult);
-        return urlAgentResult;
-      } else {
-        console.log("⚠️ Ingen source_files hittades, returnerar bara rfAgentResult");
-        console.log("📦 rfAgentResult:", rfAgentResult);
-        return rfAgentResult;
-      }
+      return rfAgentResult;
     }
   });
 }
