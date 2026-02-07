@@ -9,8 +9,17 @@ const fileSearch = fileSearchTool([
   "vs_691a5156555c8191ab2a810b9a3148dc"
 ])
 
-// Shared client for guardrails and file search
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Shared client for guardrails and file search - lazy loaded
+let client: OpenAI | null = null;
+function getClient() {
+  if (!client) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error("OPENAI_API_KEY environment variable is not set");
+    }
+    client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return client;
+}
 
 // Guardrails definitions
 const guardrailConfig = {
@@ -20,7 +29,10 @@ const guardrailConfig = {
     { name: "Custom Prompt Check", config: { system_prompt_details: "You are a supposed to answer questions about previous debates in Region Östergötland. Raise the guardrail if questions aren’t focused on what has been said in a particular debate, citations from specific speakers or parties, arguments raised by specific speakers or parties, on sources for citations or general assumptions. Follow-up questions and answers from an earlier response should not raise the guardrail.", model: "gpt-4.1-mini", confidence_threshold: 0.7 } }
   ]
 };
-const context = { guardrailLlm: client };
+
+function getContext() {
+  return { guardrailLlm: getClient() };
+}
 
 function guardrailsHasTripwire(results: any[]): boolean {
     return (results ?? []).some((r) => r?.tripwireTriggered === true);
@@ -41,7 +53,7 @@ async function scrubConversationHistory(history: any[], piiOnly: any): Promise<v
         const content = Array.isArray(msg?.content) ? msg.content : [];
         for (const part of content) {
             if (part && typeof part === "object" && part.type === "input_text" && typeof part.text === "string") {
-                const res = await runGuardrails(part.text, piiOnly, context, true);
+                const res = await runGuardrails(part.text, piiOnly, getContext(), true);
                 part.text = getGuardrailSafeText(res, part.text);
             }
         }
@@ -52,13 +64,13 @@ async function scrubWorkflowInput(workflow: any, inputKey: string, piiOnly: any)
     if (!workflow || typeof workflow !== "object") return;
     const value = workflow?.[inputKey];
     if (typeof value !== "string") return;
-    const res = await runGuardrails(value, piiOnly, context, true);
+    const res = await runGuardrails(value, piiOnly, getContext(), true);
     workflow[inputKey] = getGuardrailSafeText(res, value);
 }
 
 async function runAndApplyGuardrails(inputText: string, config: any, history: any[], workflow: any) {
     const guardrails = Array.isArray(config?.guardrails) ? config.guardrails : [];
-    const results = await runGuardrails(inputText, config, context, true);
+    const results = await runGuardrails(inputText, config, getContext(), true);
     const shouldMaskPII = guardrails.find((g: any) => (g?.name === "Contains PII") && g?.config && g.config.block === false);
     if (shouldMaskPII) {
         const piiOnly = { guardrails: [shouldMaskPII] };
