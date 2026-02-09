@@ -6,7 +6,7 @@ import { z } from "zod";
 
 // Tool definitions
 const fileSearch = fileSearchTool([
-  "vs_691a5156555c8191ab2a810b9a3148dc"
+  "vs_698a3c7261b08191b29387f99fba2126"
 ])
 
 // Shared client for guardrails and file search - lazy loaded

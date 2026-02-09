@@ -136,7 +136,9 @@ export async function POST(req: Request) {
       // Map citations with source_url from url-mapping.json
       if (Array.isArray(citations) && citations.length > 0) {
         response.citations = citations.map((cite: any) => {
+          console.log("📄 Citation source_file:", cite.source_file);
           const mapping = (urlMapping as Record<string, any>)[cite.source_file];
+          console.log("🗺️ Mapping found:", mapping ? "Yes" : "No", mapping);
           return {
             citation: cite.citation || "",
             time_stamp: cite.time_stamp || "",
