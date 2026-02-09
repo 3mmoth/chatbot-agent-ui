@@ -149,7 +149,7 @@ export default function ChatPage() {
 
   return (
     <main style={{ maxWidth: 800, margin: "40px auto", padding: "0 20px" }}>
-      <h1>AI‑Agent Chat</h1>
+      <h1 style={{ textAlign: "center" }}>🏛️ Fullmäktigechatt - Region Östergötland🏛️</h1>
 
       <div style={{ border: "1px solid #ccc", padding: 16, minHeight: 300, borderRadius: 8 }}>
         {messages.map((m, i) => (
