@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { runWorkflow } from "@/lib/runWorkflow";
-import urlMapping from "@/lib/data/url-mapping.json";
+import kfUrlMapping from "@/lib/data/kf-url-mapping.json";
+import rfUrlMapping from "@/lib/data/rf-url-mapping.json";
 
 // Helper function to check if result is a guardrail failure
 function isGuardrailFailure(result: any): boolean {
@@ -60,7 +61,8 @@ function formatGuardrailError(result: any): string {
 
 export async function POST(req: Request) {
   try {
-    const { message } = await req.json();
+    const { message, fullmaktige } = await req.json();
+    const activeUrlMapping = fullmaktige === "KF" ? kfUrlMapping : rfUrlMapping;
 
     if (!message || typeof message !== "string" || message.trim().length === 0) {
       return NextResponse.json(
@@ -72,10 +74,21 @@ export async function POST(req: Request) {
       );
     }
 
-    console.log("📥 Inkommande meddelande:", message);
+    if (fullmaktige !== "RF" && fullmaktige !== "KF") {
+      return NextResponse.json(
+        {
+          error: true,
+          message: "Vänligen välj RF eller KF."
+        },
+        { status: 400 }
+      );
+    }
+
+    console.log("📥 Inkommande meddelande:", message, "| Fullmäktige:", fullmaktige);
 
     const result = await runWorkflow({
-      input_as_text: message
+      input_as_text: message,
+      fullmaktige
     });
 
     console.log("📤 Resultat från runWorkflow:", JSON.stringify(result, null, 2));
@@ -96,6 +109,7 @@ export async function POST(req: Request) {
     // Default response structure
     let response = {
       output_text: "",
+      fullmaktige,
       citations: [] as Array<{
         citation: string;
         time_stamp: string;
@@ -133,11 +147,11 @@ export async function POST(req: Request) {
       
       response.output_text = outputText;
       
-      // Map citations with source_url from url-mapping.json
+      // Map citations with source_url from the correct RF/KF url mapping
       if (Array.isArray(citations) && citations.length > 0) {
         response.citations = citations.map((cite: any) => {
           console.log("📄 Citation source_file:", cite.source_file);
-          const mapping = (urlMapping as Record<string, any>)[cite.source_file];
+          const mapping = (activeUrlMapping as Record<string, any>)[cite.source_file];
           console.log("🗺️ Mapping found:", mapping ? "Yes" : "No", mapping);
           return {
             citation: cite.citation || "",

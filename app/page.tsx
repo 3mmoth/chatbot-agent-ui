@@ -19,6 +19,7 @@ type Message = {
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [fullmaktige, setFullmaktige] = useState<"RF" | "KF">("RF");
   const [loading, setLoading] = useState(false);
 
   // Format message content with citations as block quotes
@@ -106,7 +107,7 @@ export default function ChatPage() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userInput }),
+        body: JSON.stringify({ message: userInput, fullmaktige }),
       });
 
       const data = await res.json();
@@ -150,6 +151,28 @@ export default function ChatPage() {
   return (
     <main style={{ maxWidth: 800, margin: "40px auto", padding: "0 20px" }}>
       <h1 style={{ textAlign: "center" }}>🏛️ Fullmäktigechatt - Region Östergötland🏛️</h1>
+
+      <div style={{ marginBottom: 12 }}>
+        <label htmlFor="fullmaktige-select" style={{ marginRight: 8, fontWeight: 600 }}>
+          Välj fullmäktige:
+        </label>
+        <select
+          id="fullmaktige-select"
+          value={fullmaktige}
+          onChange={(e) => setFullmaktige(e.target.value as "RF" | "KF")}
+          disabled={loading}
+          style={{
+            padding: "8px 10px",
+            fontSize: "1em",
+            borderRadius: 4,
+            border: "1px solid #ccc",
+            backgroundColor: "white"
+          }}
+        >
+          <option value="RF">Regionfullmäktige (RF)</option>
+          <option value="KF">Kommunfullmäktige (KF)</option>
+        </select>
+      </div>
 
       <div style={{ border: "1px solid #ccc", padding: 16, minHeight: 300, borderRadius: 8 }}>
         {messages.map((m, i) => (
