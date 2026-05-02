@@ -29,11 +29,17 @@ export default function ChatPage() {
     }
 
     const parts: React.ReactElement[] = [];
+    const standaloneCitations: Citation[] = [];
     let lastIndex = 0;
     
     // Find and replace each citation in the content with a styled block quote
     citations.forEach((cite, idx) => {
-      const citationText = cite.citation;
+      const citationText = typeof cite.citation === "string" ? cite.citation.trim() : "";
+      if (!citationText) {
+        standaloneCitations.push(cite);
+        return;
+      }
+
       const index = content.indexOf(citationText, lastIndex);
       
       if (index !== -1) {
@@ -79,6 +85,8 @@ export default function ChatPage() {
         );
         
         lastIndex = index + citationText.length;
+      } else {
+        standaloneCitations.push(cite);
       }
     });
     
@@ -89,6 +97,41 @@ export default function ChatPage() {
           {content.substring(lastIndex)}
         </div>
       );
+    }
+
+    if (standaloneCitations.length > 0) {
+      standaloneCitations.forEach((cite, idx) => {
+        parts.push(
+          <blockquote
+            key={`cite-standalone-${idx}`}
+            style={{
+              margin: "16px 0",
+              padding: "12px 16px",
+              backgroundColor: "#f8f9fa",
+              borderLeft: "4px solid #0066cc",
+              borderRadius: "4px",
+              fontStyle: "italic"
+            }}
+          >
+            {cite.citation && <div style={{ marginBottom: 8 }}>&quot;{cite.citation}&quot;</div>}
+            <div style={{ fontSize: "0.85em", color: "#666", fontStyle: "normal" }}>
+              {cite.time_stamp && (
+                <span style={{ marginRight: 12 }}>⏱ {cite.time_stamp}</span>
+              )}
+              {cite.source_url && (
+                <a
+                  href={cite.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "#0066cc", textDecoration: "none" }}
+                >
+                  🔗 Se källa (Fullmäktige {cite.date})
+                </a>
+              )}
+            </div>
+          </blockquote>
+        );
+      });
     }
     
     return <div>{parts}</div>;
@@ -150,7 +193,7 @@ export default function ChatPage() {
 
   return (
     <main style={{ maxWidth: 800, margin: "40px auto", padding: "0 20px" }}>
-      <h1 style={{ textAlign: "center" }}>🏛️ Fullmäktigechatt - Region Östergötland🏛️</h1>
+      <h1 style={{ textAlign: "center" }}>🏛️ Fullmäktigechatt 🏛️</h1>
 
       <div style={{ marginBottom: 12 }}>
         <label htmlFor="fullmaktige-select" style={{ marginRight: 8, fontWeight: 600 }}>
